@@ -159,6 +159,8 @@ typedef struct {
     Visual *visual;
     long event_mask;
     Atom DrawController;
+    Atom AnalyseFinish;
+    Atom ClearEvent;
     bool blocked;
 
     int width;
@@ -375,6 +377,8 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->rescale.y2 = ui->rescale.y / ui->rescale.c;
 
     ui->DrawController = XInternAtom(ui->dpy, "ControllerMessage", False);
+    ui->AnalyseFinish = XInternAtom(ui->dpy, "AnalyseMessage", False);
+    ui->ClearEvent = XInternAtom(ui->dpy, "Clear", False);
 
     ui->controller = controller;
     ui->write_function = write_function;
@@ -757,11 +761,11 @@ static void _expose(gx_matcheqUI *ui) {
                                CAIRO_FONT_WEIGHT_BOLD);
     cairo_text_extents(ui->cr, plug_name1, &extents);
     cairo_move_to (ui->cr, ((double)(ui->width/2.4)/ui->rescale.x-(extents.width)/2.0),
-      (double)(ui->height-30.0)/ui->rescale.y-extents.height);
+      (double)(ui->height)/ui->rescale.y-extents.height-30.0);
     cairo_show_text(ui->cr, plug_name1);
     cairo_text_extents(ui->cr, plug_name2, &extents);
     cairo_move_to (ui->cr, ((double)(ui->width/2.4)/ui->rescale.x-(extents.width)/2.0),
-      (double)(ui->height-10.0)/ui->rescale.y-extents.height);
+      (double)(ui->height)/ui->rescale.y-extents.height-10.0);
     cairo_show_text(ui->cr, plug_name2);
 
     cairo_scale (ui->cr, ui->rescale.x1, ui->rescale.y1);
@@ -846,12 +850,11 @@ inline float power2db(gx_matcheqUI *ui, int port_index, float power) {
     const float falloff = 27 * 60 * 0.0005;
     const float fallsoft = 6 * 60 * 0.0005;
 
-   // fprintf(stderr,"  %f  ",power);
     if (power <=  20.*log10(0.00021)) {
         power = 20.*log10(0.0);
         if(!ui->analyse) ui->controls[port_index].adj.old_max_value = min(0.0,ui->controls[port_index].adj.old_max_value - fallsoft); 
     }
-    //power = 20.*log10(power);
+    //power = 20.*log10(power); // moved into dsp class
     // retrieve old meter value and consider falloff
     if (power < ui->controls[port_index].adj.old_value) {
         power = max(power, ui->controls[port_index].adj.old_value - falloff);
@@ -902,8 +905,47 @@ static void send_controller_event(gx_matcheqUI *ui, int controller) {
     XSendEvent(ui->dpy, ui->win, 0, 0, (XEvent *)&xevent);
 }
 
+// send event when analyse finished
+static void send_analyse_event(gx_matcheqUI *ui, float db_set) {
+    XClientMessageEvent xevent;
+    xevent.type = ClientMessage;
+    xevent.message_type = ui->AnalyseFinish;
+    xevent.display = ui->dpy;
+    xevent.window = ui->win;
+    xevent.format = 16;
+    xevent.data.l[0] = db_set;
+    XSendEvent(ui->dpy, ui->win, 0, 0, (XEvent *)&xevent);
+}
+
+// send event when clear settings
+static void send_clear_event(gx_matcheqUI *ui, float set) {
+    XClientMessageEvent xevent;
+    xevent.type = ClientMessage;
+    xevent.message_type = ui->ClearEvent;
+    xevent.display = ui->dpy;
+    xevent.window = ui->win;
+    xevent.format = 16;
+    xevent.data.l[0] = set;
+    XSendEvent(ui->dpy, ui->win, 0, 0, (XEvent *)&xevent);
+}
+
 /*------------- check and set state of controllers ---------------*/
 static void check_value_changed(gx_matcheqUI *ui, int i, float* value);
+
+static void analyse_finish(gx_matcheqUI *ui, float v) {
+    for (int a=0;a<11;a++) {
+        ui->c_states_set[a] -= v;
+        check_value_changed(ui, a+1, &ui->c_states_set[a]);
+    }
+    if(isnormal(v)) { 
+        v = min(40.0,max(-40.0,v));
+        check_value_changed(ui, 25, &v);
+    }
+}
+
+static void clear_event(gx_matcheqUI *ui, float v) {
+    check_value_changed(ui, 26, &v);
+}
 
 static void check_switch_state(gx_matcheqUI *ui, int i, float* value) {
     float v = 0.0;
@@ -940,15 +982,8 @@ static void check_switch_state(gx_matcheqUI *ui, int i, float* value) {
             }
             if(v>10.0) v = -(10.0-v);
             else v = 0.0;
-            for (int a=0;a<11;a++) {
-                ui->c_states_set[a] -= v;
-                check_value_changed(ui, a+1, &ui->c_states_set[a]);
-            }
+            send_analyse_event(ui, v);
             ui->analyse = False;
-            if(isnormal(v)) { 
-                v = min(40.0,max(-40.0,v));
-                check_value_changed(ui, 25, &v);
-            }
         } else {
             ui->analyse = True;
         }
@@ -957,15 +992,12 @@ static void check_switch_state(gx_matcheqUI *ui, int i, float* value) {
         if ((int)(*value) == 1) {
             float zero = 0.0;
             check_value_changed(ui, 25, &zero);
-            for (int a=0;a<11;a++) {
-                check_value_changed(ui, a+1, &zero);
-            }
             for (int i=0;i<11;i++) {
-               // ui->c_states[i] = 0.0; // keep first source
                 ui->c_states2[i] = 0.0;
                 ui->c_states_set[i] = 0.0;
             }
-            check_value_changed(ui, 26, &zero);
+            send_analyse_event(ui, zero);
+            send_clear_event(ui, zero);
         }
     }
     
@@ -1318,6 +1350,14 @@ static void event_handler(gx_matcheqUI *ui) {
                 if (xev.xclient.message_type == ui->DrawController) {
                     int i = (int)xev.xclient.data.l[0];
                     controller_expose(ui, i, &ui->controls[i]);
+                }
+                if (xev.xclient.message_type == ui->AnalyseFinish) {
+                    float v = (float)xev.xclient.data.l[0];
+                    analyse_finish(ui,v);
+                }
+                if (xev.xclient.message_type == ui->ClearEvent) {
+                    float v = (float)xev.xclient.data.l[0];
+                    clear_event(ui,v);
                 }
             break;
 

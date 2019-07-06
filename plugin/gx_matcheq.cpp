@@ -86,6 +86,7 @@ private:
   float           ramp_up_step;
   float           ramp_down_step;
   bool            bypassed;
+  bool            no_clear;
 
   // private functions
   inline void run_dsp_(uint32_t n_samples);
@@ -120,9 +121,14 @@ Gx_matcheq_::Gx_matcheq_() :
   gain(gain::plugin()),
   bypass(0),
   bypass_(2),
+  match2(0),
+  match2_(0),
+  clear(0),
+  clear_(0),
   needs_ramp_down(false),
   needs_ramp_up(false),
-  bypassed(false) {};
+  bypassed(false),
+  no_clear(true) {};
 
 // destructor
 Gx_matcheq_::~Gx_matcheq_()
@@ -216,6 +222,7 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
     if (!bypass_) {
       needs_ramp_down = true;
       needs_ramp_up = false;
+      no_clear = false;
     } else {
       needs_ramp_down = false;
       needs_ramp_up = true;
@@ -227,6 +234,15 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
     if (!match2_) {
       needs_ramp_down = true;
       needs_ramp_up = true;
+      no_clear = true;
+    }
+  }
+  if (clear_ != static_cast<uint32_t>(*(clear))) {
+    clear_ = static_cast<uint32_t>(*(clear));
+    if (!clear_) {
+      needs_ramp_down = true;
+      needs_ramp_up = true;
+      no_clear = true;
     }
   }
 
@@ -252,7 +268,7 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
 
     if (ramp_down <= 0.0) {
       // when ramped down, clear buffer from matcheq class
-      if (match2_) {
+      if (!no_clear) {
         gain->clear_state(gain);
         matcheq->clear_state(matcheq);
         bypassed = true;
