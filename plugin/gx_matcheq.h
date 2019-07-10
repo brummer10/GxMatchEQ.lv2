@@ -59,6 +59,7 @@ typedef enum
    MATCH2,
    GAIN,
    CLEAR, 
+   PROFILE,
 } PortIndex;
 
 #endif //SRC_HEADERS_GXEFFECTS_H_

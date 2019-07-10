@@ -231,11 +231,11 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
   }
   if (match2_ != static_cast<uint32_t>(*(match2))) {
     match2_ = static_cast<uint32_t>(*(match2));
-    if (!match2_) {
+   // if (!match2_) {
       needs_ramp_down = true;
       needs_ramp_up = true;
       no_clear = true;
-    }
+    //}
   }
   if (clear_ != static_cast<uint32_t>(*(clear))) {
     clear_ = static_cast<uint32_t>(*(clear));

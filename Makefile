@@ -42,7 +42,7 @@
 	# invoke build files
 	OBJECTS = plugin/$(NAME).cpp 
 	GUI_OBJECTS = gui/$(NAME)_x11ui.c
-	RES_OBJECTS = gui/pedal.o gui/meter_overlay.o gui/meter_surface.o gui/slider.o
+	RES_OBJECTS = gui/pedal.o gui/meter_overlay.o gui/meter_surface.o gui/meter_profile.o gui/slider.o
 	## output style (bash colours)
 	BLUE = "\033[1;34m"
 	RED =  "\033[1;31m"
@@ -68,11 +68,12 @@ ifdef ARMCPU
 endif
 
    #@build resource object files
-$(RES_OBJECTS) : gui/pedal.png gui/meter_overlay.png gui/meter_surface.png gui/slider.png
+$(RES_OBJECTS) : gui/pedal.png gui/meter_overlay.png gui/meter_surface.png gui/meter_profile.png gui/slider.png
 	@echo $(LGREEN)"generate resource files,"$(NONE)
 	-@cd ./gui && ld -r -b binary pedal.png -o pedal.o
 	-@cd ./gui && ld -r -b binary meter_overlay.png -o meter_overlay.o
 	-@cd ./gui && ld -r -b binary meter_surface.png -o meter_surface.o
+	-@cd ./gui && ld -r -b binary meter_profile.png -o meter_profile.o
 	-@cd ./gui && ld -r -b binary slider.png -o slider.o
 
 clean :

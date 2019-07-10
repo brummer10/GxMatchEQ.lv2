@@ -318,6 +318,16 @@ rdfs:comment """
         lv2:minimum 0.0 ;
         lv2:maximum 1.0 ;
         lv2:portProperty lv2:toggled;
+    ]      , [
+        a lv2:InputPort ,
+            lv2:ControlPort ;
+        lv2:index 29 ;
+        lv2:symbol "PROFILE" ;
+        lv2:name "PROFILE" ;
+        lv2:default 0.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        lv2:portProperty lv2:toggled;
     ] .
 
 <http://guitarix.sourceforge.net/plugins/gx_matcheq_gui#_matcheq_>
