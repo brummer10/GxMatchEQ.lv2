@@ -20,6 +20,34 @@
 
 #include "./gx_matcheq.h"
 
+///////////////////////// DENORMAL PROTECTION WITH SSE /////////////////
+
+#ifdef __SSE__
+/* On Intel set FZ (Flush to Zero) and DAZ (Denormals Are Zero)
+   flags to avoid costly denormals */
+#ifdef __SSE3__
+#ifndef _PMMINTRIN_H_INCLUDED
+#include <pmmintrin.h>
+#endif //ndef
+inline void AVOIDDENORMALS()
+{
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+}
+#else
+#ifndef _XMMINTRIN_H_INCLUDED
+#include <xmmintrin.h>
+#endif //ndef
+inline void AVOIDDENORMALS()
+{
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+}
+#endif //__SSE3__
+
+#else
+inline void AVOIDDENORMALS() {}
+#endif //__SSE__
+
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
                 define controller numbers
@@ -292,6 +320,8 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
         fprintf(stderr,"ERROR: failed to instantiate plugin with URI %s\n", plugin_uri);
         return NULL;
     }
+
+    AVOIDDENORMALS();
 
     ui->parentXwindow = 0;
     LV2UI_Resize* resize = NULL;
