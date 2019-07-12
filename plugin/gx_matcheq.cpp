@@ -28,7 +28,10 @@
 ///////////////////////// DENORMAL PROTECTION WITH SSE /////////////////
 
 #ifdef __SSE__
+#include <immintrin.h>
+#ifndef _IMMINTRIN_H_INCLUDED
 #include <fxsrintrin.h>
+#endif
 /* On Intel set FZ (Flush to Zero) and DAZ (Denormals Are Zero)
    flags to avoid costly denormals */
 #ifdef __SSE3__
