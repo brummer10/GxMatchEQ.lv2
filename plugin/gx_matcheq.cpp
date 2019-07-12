@@ -50,6 +50,7 @@ inline void AVOIDDENORMALS()
 
 #else
 inline void AVOIDDENORMALS() {}
+
 #endif //__SSE__
 
 ///////////////////////// MACRO SUPPORT ////////////////////////////////
@@ -89,6 +90,44 @@ template<class T> inline T mydsp_faustpower6_f(T x) {return (((((x * x) * x) * x
 
 namespace matcheq {
 
+class DenormalProtection
+{
+private:
+  int mxcsr;
+  int f_mxcsr;
+  int d_mxcsr;
+  int old_mxcsr;
+  bool need_set;
+public:
+  void set_() {
+    need_set = false;
+#ifdef __SSE__
+    f_mxcsr = _mm_getcsr() & _MM_FLUSH_ZERO_MASK;
+    old_mxcsr =  _mm_getcsr();
+    mxcsr = old_mxcsr;
+    if(f_mxcsr != 0x8000) {
+      need_set = true;
+      mxcsr |= (1<<15) | (1<<11);
+    }
+#ifdef __SSE3__
+    d_mxcsr = _mm_getcsr() & _MM_DENORMALS_ZERO_MASK;
+    if(d_mxcsr != 0x0040) {
+      need_set = true;
+      mxcsr |= (1<<6);
+    }
+#endif
+    if(need_set) _mm_setcsr(mxcsr);
+#endif
+  };
+  void reset_() {
+#ifdef __SSE__
+    if(need_set) _mm_setcsr(old_mxcsr);
+#endif
+  };
+  DenormalProtection() {};
+  ~DenormalProtection() {};
+};
+
 class Gx_matcheq_
 {
 private:
@@ -98,6 +137,7 @@ private:
   // pointer to dsp class
   PluginLV2*      matcheq;
   PluginLV2*      gain;
+  DenormalProtection MXCRS;
 
   // bypass ramping
   float*          bypass;
@@ -147,6 +187,7 @@ Gx_matcheq_::Gx_matcheq_() :
   input(NULL),
   matcheq(matcheq::plugin()),
   gain(gain::plugin()),
+  MXCRS(),
   bypass(0),
   bypass_(2),
   match2(0),
@@ -243,6 +284,8 @@ void Gx_matcheq_::deactivate_f()
 
 void Gx_matcheq_::run_dsp_(uint32_t n_samples)
 {
+  //AVOIDDENORMALS();
+  MXCRS.set_();
   FAUSTFLOAT buf[n_samples];
   // do inplace processing at default
   memcpy(output, input, n_samples*sizeof(float));
@@ -328,7 +371,7 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
       ramp_down = ramp_up;
     }
   }
-
+  MXCRS.reset_();
 }
 
 void Gx_matcheq_::connect_all__ports(uint32_t port, void* data)
