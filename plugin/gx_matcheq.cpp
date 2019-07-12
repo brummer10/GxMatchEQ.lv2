@@ -23,33 +23,23 @@
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
+#include <stdint.h>
 
 ///////////////////////// DENORMAL PROTECTION WITH SSE /////////////////
 
 #ifdef __SSE__
+#include <fxsrintrin.h>
 /* On Intel set FZ (Flush to Zero) and DAZ (Denormals Are Zero)
    flags to avoid costly denormals */
 #ifdef __SSE3__
 #ifndef _PMMINTRIN_H_INCLUDED
 #include <pmmintrin.h>
-#endif //ndef
-inline void AVOIDDENORMALS()
-{
-  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-}
+#endif
 #else
 #ifndef _XMMINTRIN_H_INCLUDED
 #include <xmmintrin.h>
-#endif //ndef
-inline void AVOIDDENORMALS()
-{
-  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-}
+#endif
 #endif //__SSE3__
-
-#else
-inline void AVOIDDENORMALS() {}
 
 #endif //__SSE__
 
@@ -93,39 +83,40 @@ namespace matcheq {
 class DenormalProtection
 {
 private:
-  int mxcsr;
-  int f_mxcsr;
-  int d_mxcsr;
-  int old_mxcsr;
-  bool need_set;
+#ifdef __SSE__
+  uint32_t  mxcsr_mask;
+  uint32_t  mxcsr;
+#endif
+
 public:
-  void set_() {
-    need_set = false;
+  inline void set_() {
 #ifdef __SSE__
-    f_mxcsr = _mm_getcsr() & _MM_FLUSH_ZERO_MASK;
-    old_mxcsr =  _mm_getcsr();
-    mxcsr = old_mxcsr;
-    if(f_mxcsr != 0x8000) {
-      need_set = true;
-      mxcsr |= (1<<15) | (1<<11);
-    }
-#ifdef __SSE3__
-    d_mxcsr = _mm_getcsr() & _MM_DENORMALS_ZERO_MASK;
-    if(d_mxcsr != 0x0040) {
-      need_set = true;
-      mxcsr |= (1<<6);
-    }
-#endif
-    if(need_set) _mm_setcsr(mxcsr);
+    mxcsr = _mm_getcsr();
+    _mm_setcsr((mxcsr | _MM_DENORMALS_ZERO_MASK | _MM_FLUSH_ZERO_MASK) & mxcsr_mask);
 #endif
   };
-  void reset_() {
+  inline void reset_() {
 #ifdef __SSE__
-    if(need_set) _mm_setcsr(old_mxcsr);
+    _mm_setcsr(mxcsr);
 #endif
   };
-  DenormalProtection() {};
-  ~DenormalProtection() {};
+
+  inline DenormalProtection()
+  {
+#ifdef __SSE__
+    mxcsr_mask = 0xffbf; // Default MXCSR mask
+    mxcsr      = 0;
+    uint8_t fxsave[512] __attribute__ ((aligned (16))); // Structure for storing FPU state with FXSAVE command
+
+    memset(fxsave, 0, sizeof(fxsave));
+    __builtin_ia32_fxsave(&fxsave);
+    uint32_t mask = *(reinterpret_cast<uint32_t *>(&fxsave[0x1c])); // Obtain the MXCSR mask from FXSAVE structure
+    if (mask != 0)
+        mxcsr_mask = mask;
+#endif
+  };
+
+  inline ~DenormalProtection() {};
 };
 
 class Gx_matcheq_
@@ -137,7 +128,7 @@ private:
   // pointer to dsp class
   PluginLV2*      matcheq;
   PluginLV2*      gain;
-  DenormalProtection MXCRS;
+  DenormalProtection MXCSR;
 
   // bypass ramping
   float*          bypass;
@@ -187,7 +178,7 @@ Gx_matcheq_::Gx_matcheq_() :
   input(NULL),
   matcheq(matcheq::plugin()),
   gain(gain::plugin()),
-  MXCRS(),
+  MXCSR(),
   bypass(0),
   bypass_(2),
   match2(0),
@@ -197,9 +188,9 @@ Gx_matcheq_::Gx_matcheq_() :
   needs_ramp_down(false),
   needs_ramp_up(false),
   bypassed(false),
-  no_clear(true) {
-    AVOIDDENORMALS();
-  };
+  no_clear(true)
+{
+};
 
 // destructor
 Gx_matcheq_::~Gx_matcheq_()
@@ -284,8 +275,8 @@ void Gx_matcheq_::deactivate_f()
 
 void Gx_matcheq_::run_dsp_(uint32_t n_samples)
 {
-  //AVOIDDENORMALS();
-  MXCRS.set_();
+  MXCSR.set_();
+
   FAUSTFLOAT buf[n_samples];
   // do inplace processing at default
   memcpy(output, input, n_samples*sizeof(float));
@@ -371,7 +362,8 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
       ramp_down = ramp_up;
     }
   }
-  MXCRS.reset_();
+
+  MXCSR.reset_();
 }
 
 void Gx_matcheq_::connect_all__ports(uint32_t port, void* data)
