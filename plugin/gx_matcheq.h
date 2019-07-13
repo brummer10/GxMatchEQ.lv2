@@ -60,6 +60,7 @@ typedef enum
    GAIN,
    CLEAR, 
    PROFILE,
+   MORPH,
 } PortIndex;
 
 #endif //SRC_HEADERS_GXEFFECTS_H_

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <locale.h>
+#include <assert.h>
 
 #include <cairo.h>
 #include <cairo-xlib.h>
@@ -20,41 +21,13 @@
 
 #include "./gx_matcheq.h"
 
-///////////////////////// DENORMAL PROTECTION WITH SSE /////////////////
-
-#ifdef __SSE__
-/* On Intel set FZ (Flush to Zero) and DAZ (Denormals Are Zero)
-   flags to avoid costly denormals */
-#ifdef __SSE3__
-#ifndef _PMMINTRIN_H_INCLUDED
-#include <pmmintrin.h>
-#endif //ndef
-inline void AVOIDDENORMALS()
-{
-  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-}
-#else
-#ifndef _XMMINTRIN_H_INCLUDED
-#include <xmmintrin.h>
-#endif //ndef
-inline void AVOIDDENORMALS()
-{
-  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-}
-#endif //__SSE3__
-
-#else
-inline void AVOIDDENORMALS() {}
-#endif //__SSE__
-
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
                 define controller numbers
 -----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
 
-#define CONTROLS 28
+#define CONTROLS 29
 
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
@@ -63,6 +36,18 @@ inline void AVOIDDENORMALS() {}
 ----------------------------------------------------------------------*/
 
 #define MAXPROFILES 15
+
+/*---------------------------------------------------------------------
+-----------------------------------------------------------------------	
+					define debug print
+-----------------------------------------------------------------------
+----------------------------------------------------------------------*/
+
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+#define debug_print(...) \
+            ((void)((DEBUG) ? fprintf(stderr, __VA_ARGS__) : 0))
 
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
@@ -142,6 +127,7 @@ typedef struct {
 // define controller type
 typedef enum {
     SLIDER,
+    DBSLIDER,
     SWITCH,
     BSWITCH,
     ENUM,
@@ -191,11 +177,38 @@ typedef struct {
 } gx_scale;
 
 // basic widget with cairo surface
+
+typedef void (*xevfunc)(void * widget, void* user_data);
+
 typedef struct {
+    Display *dpy;
     Window widget;
+    xevfunc button1_callback;
+    xevfunc button_release_callback;
+    xevfunc enter_callback;
+    xevfunc leave_callback;
     cairo_surface_t *surface;
     cairo_t *cr;
+    int data;
+    const char* label;
+    bool active;
 } Widget_t;
+
+static void draw_menu_item(void *w_, void* user_data);
+static void draw_text_input(cairo_t * cr);
+static void text_input_add_text(Widget_t *w, char *label, char *text_field);
+static void text_input_clip(Widget_t *w, char *text_field);
+static void destroy_widget(Widget_t *w, XContext Context);
+
+Widget_t *create_widget(Display *dpy, Window win, XContext Context,
+                          int x, int y, int widht, int height);
+
+Widget_t *create_menu_item(Display *dpy, Window win, XContext Context, const char* label,
+                          int x, int y, int widht, int height);
+
+Widget_t *create_text_box(Display *dpy, Window win, XContext Context,
+                          int x, int y, int widht, int height);
+
 
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
@@ -205,17 +218,19 @@ typedef struct {
 
 // main window struct
 typedef struct {
+    XContext widgets_context;
+    xevfunc button1_callback;
     Display *dpy;
     Window win;
-    Widget_t pop_win;
-    Widget_t load_p;
-    Widget_t save_p;
-    Widget_t delete_p;
-    Widget_t text_input;
-    Widget_t ok;
-    Widget_t cancel;
-    Widget_t preset_menu;
-    Widget_t menu_item[MAXPROFILES];
+    Widget_t *pop_win;
+    Widget_t *load_p;
+    Widget_t *save_p;
+    Widget_t *delete_p;
+    Widget_t *text_input;
+    Widget_t *ok;
+    Widget_t *cancel;
+    Widget_t *preset_menu;
+    Widget_t *menu_item[MAXPROFILES];
     profile p[MAXPROFILES];
     void *parentXwindow;
     Visual *visual;
@@ -228,7 +243,7 @@ typedef struct {
     bool menu_poped;
     bool menu_delete_poped;
     bool text_in;
-    char input_label[124];
+    char input_label[16];
     int profile_counter;
     const char *current_profile;
     char profile_file[256];
@@ -246,6 +261,7 @@ typedef struct {
     cairo_surface_t *frame;
     cairo_surface_t *fswitch;
     cairo_surface_t *fslider;
+    cairo_surface_t *dbslider;
     cairo_surface_t *meter_back;
     cairo_surface_t *meter_ahead;
     cairo_surface_t *meter_state;
@@ -254,6 +270,7 @@ typedef struct {
     cairo_t *cr;
     cairo_t *crm;
     cairo_t *crs;
+    cairo_t *crfs;
 
     gx_controller controls[CONTROLS];
     double start_value;
@@ -277,9 +294,9 @@ static void resize_event(gx_matcheqUI *ui);
 static int read_profile_file(gx_matcheqUI *ui, profile *p, int del);
 static void check_value_changed(gx_matcheqUI *ui, int i, float* value);
 static void send_controller_event(gx_matcheqUI *ui, int controller);
-static void popup_menu_destroy(gx_matcheqUI *ui);
-static void preset_menu_destroy(gx_matcheqUI *ui);
-static void text_input_destroy(gx_matcheqUI *ui);
+static void popup_menu_destroy(void *ui_, void* user_data);
+static void preset_menu_destroy(void *ui_, void* user_data);
+static void text_input_destroy(void *ui_, void* user_data);
 
 /*---------------------------------------------------------------------
 -----------------------------------------------------------------------    
@@ -317,11 +334,9 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     gx_matcheqUI* ui = (gx_matcheqUI*)malloc(sizeof(gx_matcheqUI));
 
     if (!ui) {
-        fprintf(stderr,"ERROR: failed to instantiate plugin with URI %s\n", plugin_uri);
+        debug_print("ERROR: failed to instantiate plugin with URI %s\n", plugin_uri);
         return NULL;
     }
-
-    AVOIDDENORMALS();
 
     ui->parentXwindow = 0;
     LV2UI_Resize* resize = NULL;
@@ -335,33 +350,34 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     }
 
     if (ui->parentXwindow == NULL)  {
-        fprintf(stderr, "ERROR: Failed to open parentXwindow for %s\n", plugin_uri);
+        debug_print("ERROR: Failed to open parentXwindow for %s\n", plugin_uri);
         free(ui);
         return NULL;
     }
 
+    ui->widgets_context = XUniqueContext();
     ui->dpy = XOpenDisplay(0);
 
     if (ui->dpy == NULL)  {
-        fprintf(stderr, "ERROR: Failed to open display for %s\n", plugin_uri);
+        debug_print("ERROR: Failed to open display for %s\n", plugin_uri);
         free(ui);
         return NULL;
     }
     //31.25, 62.5, 125., 250., 500., 1000., 2000., 4000., 8000., 16000.
     ui->controls[0] = (gx_controller) {{1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0}, {30, 280, 40, 40}, false,"POWER", BSWITCH, BYPASS};
-    ui->controls[1] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {40, 30, 20, 216}, false,">", SLIDER, G1};
-    ui->controls[2] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {60, 30, 20, 216}, false,"63", SLIDER, G2};
-    ui->controls[3] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {80, 30, 20, 216}, false,"125", SLIDER, G3};
-    ui->controls[4] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {100, 30, 20, 216}, false,"250", SLIDER, G4};
-    ui->controls[5] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {120, 30, 20, 216}, false,"500", SLIDER, G5};
-    ui->controls[6] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {140, 30, 20, 216}, false,"1k", SLIDER, G6};
-    ui->controls[7] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {160, 30, 20, 216}, false,"2k", SLIDER, G7};
-    ui->controls[8] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {180, 30, 20, 216}, false,"4k", SLIDER, G8};
-    ui->controls[9] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {200, 30, 20, 216}, false,"8k", SLIDER, G9};
-    ui->controls[10] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {220, 30, 20, 216}, false,"16k", SLIDER, G10};
-    ui->controls[11] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {240, 30, 20, 216}, false,"<", SLIDER, G11};
+    ui->controls[1] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {40, 30, 20, 216}, false,">", DBSLIDER, G1};
+    ui->controls[2] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {60, 30, 20, 216}, false,"63", DBSLIDER, G2};
+    ui->controls[3] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {80, 30, 20, 216}, false,"125", DBSLIDER, G3};
+    ui->controls[4] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {100, 30, 20, 216}, false,"250", DBSLIDER, G4};
+    ui->controls[5] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {120, 30, 20, 216}, false,"500", DBSLIDER, G5};
+    ui->controls[6] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {140, 30, 20, 216}, false,"1k", DBSLIDER, G6};
+    ui->controls[7] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {160, 30, 20, 216}, false,"2k", DBSLIDER, G7};
+    ui->controls[8] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {180, 30, 20, 216}, false,"4k", DBSLIDER, G8};
+    ui->controls[9] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {200, 30, 20, 216}, false,"8k", DBSLIDER, G9};
+    ui->controls[10] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {220, 30, 20, 216}, false,"16k", DBSLIDER, G10};
+    ui->controls[11] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -70.0, 10.0, 0.1}, {240, 30, 20, 216}, false,"<", DBSLIDER, G11};
 
-    ui->v1_value = 20.*log10(0.0);
+    ui->v1_value = 20.*log10(0.00000021);
     ui->controls[12] = (gx_controller) {{-70.0, -70.0, ui->v1_value, ui->v1_value, -70.0, 5.0, 0.00001}, {40, 30, 20, 216}, false,"V1", METER, V1};
     ui->controls[13] = (gx_controller) {{-70.0, -70.0, ui->v1_value, ui->v1_value, -70.0, 5.0, 0.00001}, {60, 30, 20, 216}, false,"V2", METER, V2};
     ui->controls[14] = (gx_controller) {{-70.0, -70.0, ui->v1_value, ui->v1_value, -70.0, 5.0, 0.00001}, {80, 30, 20, 216}, false,"V3", METER, V3};
@@ -379,6 +395,7 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->controls[25] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, -40.0, 40.0, 0.1}, {150, 280, 40, 40}, false,"Gain", KNOB, GAIN};
     ui->controls[26] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0}, {245, 307, 40, 20}, false," Clear", SWITCH, CLEAR};
     ui->controls[27] = (gx_controller) {{0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0}, {245, 282, 40, 20}, false,"Profile", SWITCH, PROFILE};
+    ui->controls[28] = (gx_controller) {{1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.005}, {5, 30, 30, 216}, false,"Morph", SLIDER, MORPH};
 
     ui->start_value = 0.0;
     ui->sc = NULL;
@@ -396,7 +413,7 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->pedal = cairo_image_surface_create_from_stream(ui, LDVAR(pedal_png));
     ui->init_width = cairo_image_surface_get_width(ui->pedal);
     ui->height = ui->init_height = cairo_image_surface_get_height(ui->pedal);
-    ui->width = ui->init_width -195 + (10 * CONTROLS);
+    ui->width = ui->init_width -205 + (10 * CONTROLS);
 
     ui->win = XCreateWindow(ui->dpy, (Window)ui->parentXwindow, 0, 0,
                                 ui->width, ui->height, 0,
@@ -429,10 +446,13 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->frame = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 42, 62);
     ui->crf = cairo_create (ui->frame);
 
-    ui->fslider = cairo_image_surface_create_from_stream(ui, LDVAR(slider_png));
+    ui->dbslider = cairo_image_surface_create_from_stream(ui, LDVAR(slider_png));
 
     ui->fswitch = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 40, 20);
     ui->crs = cairo_create (ui->fswitch);
+
+    ui->fslider = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 30, 240);
+    ui->crfs = cairo_create (ui->fslider);
 
     ui->meter_back = cairo_image_surface_create_from_stream(ui, LDVAR(meter_surface_png));
     ui->meter_ahead = cairo_image_surface_create_from_stream(ui, LDVAR(meter_overlay_png));
@@ -441,6 +461,8 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->crm = cairo_create (ui->meter_state);
 
     *widget = (void*)ui->win;
+   // if(XSaveContext(ui->dpy, ui->win, ui->widgets_context, (XPointer) ui))
+   //     fprintf(stderr, "contex save faild\n");
 
     strcat(strcpy(ui->profile_file, getenv("HOME")), "/.matcheq.conf"); 
     ui->blocked = false;
@@ -460,7 +482,7 @@ static LV2UI_Handle instantiate(const struct _LV2UI_Descriptor * descriptor,
     ui->rescale.y  = (double)ui->height/ui->init_height;
     ui->rescale.x1 = (double)ui->init_width/ui->width;
     ui->rescale.y1 = (double)ui->init_height/ui->height;
-    ui->rescale.xc = (double)ui->width/(ui->init_width-195 + (10 * CONTROLS));
+    ui->rescale.xc = (double)ui->width/(ui->init_width-205 + (10 * CONTROLS));
     ui->rescale.c = (ui->rescale.xc < ui->rescale.y) ? ui->rescale.xc : ui->rescale.y;
     ui->rescale.x2 =  ui->rescale.xc / ui->rescale.c;
     ui->rescale.y2 = ui->rescale.y / ui->rescale.c;
@@ -483,7 +505,9 @@ static void cleanup(LV2UI_Handle handle) {
     cairo_destroy(ui->crf);
     cairo_destroy(ui->crm);
     cairo_destroy(ui->crs);
+    cairo_destroy(ui->crfs);
     cairo_surface_destroy(ui->pedal);
+    cairo_surface_destroy(ui->dbslider);
     cairo_surface_destroy(ui->fslider);
     cairo_surface_destroy(ui->fswitch);
     cairo_surface_destroy(ui->surface);
@@ -493,12 +517,14 @@ static void cleanup(LV2UI_Handle handle) {
     cairo_surface_destroy(ui->meter_prof);
     cairo_surface_destroy(ui->meter_state);
 
-    if (ui->poped) popup_menu_destroy(ui);
-    if (ui->menu_poped) preset_menu_destroy(ui);
-    if (ui->menu_delete_poped) preset_menu_destroy(ui);
-    if (ui->text_in) text_input_destroy(ui);
+    if (ui->poped) popup_menu_destroy(ui,NULL);
+    if (ui->menu_poped) preset_menu_destroy(ui,NULL);
+    if (ui->menu_delete_poped) preset_menu_destroy(ui,NULL);
+    if (ui->text_in) text_input_destroy(ui,NULL);
 
     XDestroySubwindows(ui->dpy, ui->win);
+    XDeleteContext(ui->dpy, ui->win, ui->widgets_context);
+    XUnmapWindow(ui->dpy, ui->win);
     XDestroyWindow(ui->dpy, ui->win);
     XCloseDisplay(ui->dpy);
     free(ui);
@@ -510,47 +536,76 @@ static void cleanup(LV2UI_Handle handle) {
 -----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
 
-bool widget_is_mapped(Display *dpy,Window winId) {
-    Window root, parent, *children = NULL;
-    unsigned int num_children;
-
-    if(!XQueryTree(dpy, winId, &root, &parent, &children, &num_children))
-        return false;
-
-    if (children)
-        XFree((char *)children);
-
-    return true;
-}
-
-static void destroy_widget(Display *dpy,Widget_t * w) {
-    if(widget_is_mapped(dpy, w->widget)) {
+static void destroy_widget(Widget_t * w, XContext Context) {
+    XPointer w_;
+    if(!XFindContext(w->dpy, w->widget, Context,  &w_)) {
         cairo_destroy(w->cr);
         cairo_surface_destroy(w->surface);
-        XUnmapWindow(dpy, w->widget);
-        XDestroyWindow(dpy, w->widget);
+        XDeleteContext(w->dpy, w->widget, Context);
+        XUnmapWindow(w->dpy, w->widget);
+        XDestroyWindow(w->dpy, w->widget);
+        free(w);
     }
 }
 
-static void create_widget(Display *dpy, Widget_t * w, Window win,
+void dummy_callback(void *ui_,void* user_data) {
+    debug_print("dummy widget callback\n");
+}
+
+Widget_t *create_widget(Display *dpy, Window win, XContext Context,
                           int x, int y, int widht, int height) {
 
+    Widget_t *w = (Widget_t*)malloc(sizeof(Widget_t));
+    assert(w);
     XSetWindowAttributes attributes;
     attributes.save_under = True;
     attributes.override_redirect = True;
+
     long event_mask = StructureNotifyMask|ExposureMask|KeyPressMask 
                     |EnterWindowMask|LeaveWindowMask|ButtonReleaseMask
                     |ButtonPressMask|Button1MotionMask;
 
     w->widget = XCreateWindow(dpy, win , x, y, widht, height, 0,
-                            CopyFromParent, InputOutput,
-                            CopyFromParent, CopyFromParent|CWOverrideRedirect, &attributes);
+                            CopyFromParent, InputOutput, CopyFromParent,
+                            CopyFromParent|CWOverrideRedirect, &attributes);
+
     XSelectInput(dpy, w->widget, event_mask);
 
     w->surface =  cairo_xlib_surface_create (dpy, w->widget,  
                   DefaultVisual(dpy, DefaultScreen(dpy)), widht, height);
 
     w->cr = cairo_create(w->surface);
+    if(XSaveContext(dpy, w->widget, Context, (XPointer) w)) {
+        debug_print("contex save faild\n");
+    }
+    w->label = NULL;
+    w->active = false;
+    w->data = 0;
+    w->button1_callback = dummy_callback;
+    w->button_release_callback = dummy_callback;
+    w->enter_callback = dummy_callback;
+    w->leave_callback = dummy_callback;
+    XMapWindow(dpy, w->widget);
+    w->dpy = dpy;
+    return w;
+}
+
+Widget_t *create_menu_item(Display *dpy, Window win, XContext Context, const char* label,
+                          int x, int y, int widht, int height) {
+    Widget_t *w = create_widget(dpy, win, Context, x, y, widht, height);
+    w->label = label;
+    w->active = false;
+    draw_menu_item(w, &w->active);
+    w->enter_callback = draw_menu_item;
+    w->leave_callback = draw_menu_item;
+    return w;
+}
+
+Widget_t *create_text_box(Display *dpy, Window win, XContext Context,
+                          int x, int y, int widht, int height) {
+    Widget_t *w = create_widget(dpy, win, Context, x, y, widht, height);
+    draw_text_input(w->cr);
+    return w;
 }
 
 /*---------------------------------------------------------------------
@@ -649,6 +704,64 @@ static void knob_expose(gx_matcheqUI *ui,gx_controller* knob) {
     cairo_move_to (ui->crf, knobx1-extents.width/2, grow+6+extents.height);
     cairo_show_text(ui->crf, knob->label);
     cairo_new_path (ui->crf);
+}
+
+// draw slider
+static void slider_expose(gx_matcheqUI *ui,gx_controller* slider) {
+    cairo_set_operator(ui->crfs,CAIRO_OPERATOR_CLEAR);
+    cairo_paint(ui->crfs);
+    cairo_set_operator(ui->crfs,CAIRO_OPERATOR_OVER);
+
+    double sliderstate = (slider->adj.value - slider->adj.min_value) / (slider->adj.max_value - slider->adj.min_value);
+
+    cairo_set_source_rgba (ui->crfs, 0.1, 0.1, 0.1, 0.4);
+    cairo_move_to (ui->crfs, 15, 20);
+    cairo_line_to(ui->crfs,15,206);
+    cairo_set_line_cap (ui->crfs,CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_width(ui->crfs,15);
+    cairo_stroke(ui->crfs);
+
+    cairo_set_source_rgb (ui->crfs, 0., 0.1, 0.1);
+    cairo_move_to (ui->crfs, 15, 22);
+    cairo_line_to(ui->crfs,15,204);
+    cairo_set_line_width(ui->crfs,2);
+    cairo_stroke(ui->crfs);
+
+    cairo_arc(ui->crfs,15, 201 -( 176 * sliderstate), 10, 0, 2 * M_PI );
+    cairo_fill_preserve(ui->crfs);
+    cairo_set_line_width(ui->crfs,1);
+    cairo_set_source_rgb (ui->crfs,0.3,0.3,0.3);
+    cairo_stroke(ui->crfs);
+
+    cairo_arc(ui->crfs,15, 201 -( 176 * sliderstate), 6, 0, 2 * M_PI );
+    cairo_set_line_width(ui->crfs,1);
+    cairo_set_source_rgb (ui->crfs,0.6,0.6,0.6);
+    cairo_stroke(ui->crfs);
+    cairo_new_path (ui->crfs);
+
+    cairo_text_extents_t extents;
+
+
+    cairo_set_source_rgb (ui->crfs, 0.8, 0.8, 0.8);
+    cairo_set_font_size (ui->crfs, 8.0);
+    cairo_select_font_face (ui->crfs, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_BOLD);
+    cairo_text_extents(ui->crfs,slider->label , &extents);
+
+    cairo_move_to (ui->crfs, 14-extents.width/2, 10);
+    cairo_show_text(ui->crfs, slider->label);
+
+    if (slider->is_active) {
+        cairo_set_source_rgb (ui->crfs, 0.8, 0.8, 0.8);
+    } else {
+        cairo_set_source_rgb (ui->crfs, 0.6, 0.6, 0.6);
+    }
+    cairo_text_extents(ui->crfs,"out" , &extents);
+
+    cairo_move_to (ui->crfs, 14-extents.width/2, 225);
+    cairo_show_text(ui->crfs, "out");
+    cairo_new_path (ui->crfs);
+
 }
 
 // draw simple switches
@@ -818,9 +931,9 @@ static void meter_scale(cairo_t* cr, bool ds) {
 }
 
 // draw the slider (V)
-static void slider_expose(gx_matcheqUI *ui, int i) {
+static void db_slider_expose(gx_matcheqUI *ui, int i) {
 
-    cairo_set_source_surface (ui->crm, ui->fslider, 3, 212 -(216 * log_meter(ui->controls[i-11].adj.value)));
+    cairo_set_source_surface (ui->crm, ui->dbslider, 3, 212 -(216 * log_meter(ui->controls[i-11].adj.value)));
     cairo_rectangle(ui->crm,3, 212 -( 216 * log_meter(ui->controls[i-11].adj.value)), 12, 7);
     cairo_fill(ui->crm);
     cairo_new_path (ui->crm);
@@ -840,7 +953,9 @@ static void slider_expose(gx_matcheqUI *ui, int i) {
         cairo_select_font_face (ui->crm, "Sans", CAIRO_FONT_SLANT_NORMAL,
                                    CAIRO_FONT_WEIGHT_BOLD);
         cairo_text_extents(ui->crm, "0.00", &extents);
-        cairo_move_to (ui->crm, 10-extents.width/2, 220 -( 216 * log_meter(ui->controls[i-11].adj.value))+extents.height/2);
+        if (ui->controls[i-11].adj.value<0.0)
+            cairo_text_extents(ui->crm, "-0.00", &extents);
+        cairo_move_to (ui->crm, 12-extents.width/2, 220 -( 216 * log_meter(ui->controls[i-11].adj.value))+extents.height/2);
         cairo_show_text(ui->crm, s);
         cairo_new_path (ui->crm);
     }    /** show label below the slider**/
@@ -881,16 +996,17 @@ static void meter_expose(gx_matcheqUI *ui,  int i, gx_controller* meter_) {
     cairo_fill(ui->crm);
    
     cairo_new_path (ui->crm);
-    slider_expose(ui, i);
+    db_slider_expose(ui, i);
 }
 
 // select draw methode by controller type
 static void draw_controller(gx_matcheqUI *ui, int i, gx_controller* controller) {
-    if (controller->type == SLIDER) meter_expose(ui,i+11, controller);
+    if (controller->type == DBSLIDER) meter_expose(ui,i+11, controller);
     else if (controller->type == SWITCH) switch_expose(ui, controller);
     else if (controller->type == ENUM) knob_expose(ui, controller);
     else if (controller->type == METER) meter_expose(ui, i, controller);
     else if (controller->type == KNOB) knob_expose(ui, controller);
+    else if (controller->type == SLIDER) slider_expose(ui, controller);
     else if (controller->type == BSWITCH) bypass_expose(ui, controller);
 }
 
@@ -935,12 +1051,16 @@ static void _expose(gx_matcheqUI *ui) {
 
     for (int i=0;i<CONTROLS;i++) {
         draw_controller(ui,i, &ui->controls[i]);
-        if (ui->controls[i].type == METER || ui->controls[i].type == SLIDER ) {
+        if (ui->controls[i].type == METER || ui->controls[i].type == DBSLIDER ) {
             cairo_set_source_surface (ui->cr, ui->meter_state, 
               (double)ui->controls[i].al.x * ui->rescale.x2,
               (double)ui->controls[i].al.y * ui->rescale.y2);
         } else if (ui->controls[i].type == SWITCH ) {
             cairo_set_source_surface (ui->cr, ui->fswitch, 
+              (double)ui->controls[i].al.x * ui->rescale.x2,
+              (double)ui->controls[i].al.y * ui->rescale.y2);
+        } else if (ui->controls[i].type == SLIDER ) {
+            cairo_set_source_surface (ui->cr, ui->fslider, 
               (double)ui->controls[i].al.x * ui->rescale.x2,
               (double)ui->controls[i].al.y * ui->rescale.y2);
         } else {
@@ -976,7 +1096,7 @@ static void controller_expose(gx_matcheqUI *ui, int i, gx_controller * control) 
 
     cairo_scale (ui->cr, ui->rescale.x1, ui->rescale.y1);
     cairo_scale (ui->cr, ui->rescale.c, ui->rescale.c);
-    if(control->type == BSWITCH || ui->controls[i].type == KNOB) {
+    if(control->type == BSWITCH || ui->controls[i].type == KNOB || ui->controls[i].type == SLIDER) {
         cairo_rectangle (ui->cr,(double)control->al.x * ui->rescale.x2,
           (double)control->al.y * ui->rescale.y2,
           (double)control->al.width, (double)control->al.height+ 20.0);
@@ -989,12 +1109,16 @@ static void controller_expose(gx_matcheqUI *ui, int i, gx_controller * control) 
     cairo_stroke(ui->cr);
 
     draw_controller(ui, i, control);
-    if (ui->controls[i].type == METER || ui->controls[i].type == SLIDER ) {
+    if (ui->controls[i].type == METER || ui->controls[i].type == DBSLIDER ) {
         cairo_set_source_surface (ui->cr, ui->meter_state, 
           (double)control->al.x * ui->rescale.x2,
           (double)control->al.y * ui->rescale.y2);
     } else if (ui->controls[i].type == SWITCH ) {
         cairo_set_source_surface (ui->cr, ui->fswitch, 
+          (double)ui->controls[i].al.x * ui->rescale.x2,
+          (double)ui->controls[i].al.y * ui->rescale.y2);
+    } else if (ui->controls[i].type == SLIDER ) {
+        cairo_set_source_surface (ui->cr, ui->fslider, 
           (double)ui->controls[i].al.x * ui->rescale.x2,
           (double)ui->controls[i].al.y * ui->rescale.y2);
     } else {
@@ -1015,36 +1139,44 @@ static void controller_expose(gx_matcheqUI *ui, int i, gx_controller * control) 
 ----------------------------------------------------------------------*/
 
 // draw a menu item
-static void draw_menu_item(cairo_t * cr, const char* label, bool active,
-                    int x, int y, int widht, int height) {
-    cairo_push_group (cr);
+static void draw_menu_item(void *w_, void* user_data) {
+    Widget_t *w = (Widget_t*)w_;
+    if (!w) return;
+    bool active = *(bool*)user_data;
+    XWindowAttributes attrs;
+    XGetWindowAttributes(w->dpy, (Window)w->widget, &attrs);
+    int width = attrs.width;
+    int height = attrs.height;
+    if (attrs.map_state != IsViewable) return;
 
-    cairo_set_source_rgb (cr, 0.0, 0.1, 0.1);
+    cairo_push_group (w->cr);
+
+    cairo_set_source_rgb (w->cr, 0.0, 0.1, 0.1);
     if(active)
-        cairo_set_source_rgb (cr, 0.05, 0.15, 0.15);
-    cairo_rectangle(cr,x,y,widht,height);
-    cairo_fill_preserve (cr);
-    cairo_set_source_rgb (cr, 0.6, 0.6, 0.6);
+        cairo_set_source_rgb (w->cr, 0.05, 0.15, 0.15);
+    cairo_rectangle(w->cr,0,0,width,height);
+    cairo_fill_preserve (w->cr);
+    cairo_set_source_rgb (w->cr, 0.6, 0.6, 0.6);
     if(active)
-        cairo_set_source_rgb (cr, 0.8, 0.8, 0.8);
-    cairo_set_line_width(cr, 1.0);
-    cairo_stroke(cr);
+        cairo_set_source_rgb (w->cr, 0.8, 0.8, 0.8);
+    cairo_set_line_width(w->cr, 1.0);
+    cairo_stroke(w->cr);
 
     cairo_text_extents_t extents;
-    cairo_set_source_rgb (cr, 0.6, 0.6, 0.6);
+    cairo_set_source_rgb (w->cr, 0.6, 0.6, 0.6);
     if(active)
-        cairo_set_source_rgb (cr, 0.8, 0.8, 0.8);
-    cairo_set_font_size (cr, 12.0);
-    cairo_select_font_face (cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+        cairo_set_source_rgb (w->cr, 0.8, 0.8, 0.8);
+    cairo_set_font_size (w->cr, 12.0);
+    cairo_select_font_face (w->cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                                CAIRO_FONT_WEIGHT_BOLD);
-    cairo_text_extents(cr,label , &extents);
+    cairo_text_extents(w->cr,w->label , &extents);
 
-    cairo_move_to (cr, (widht*0.5)-extents.width/2, (height/4)+extents.height);
-    cairo_show_text(cr, label);
-    cairo_new_path (cr);
+    cairo_move_to (w->cr, (width*0.5)-extents.width/2, (height/4)+extents.height);
+    cairo_show_text(w->cr, w->label);
+    cairo_new_path (w->cr);
     
-    cairo_pop_group_to_source (cr);
-    cairo_paint (cr);
+    cairo_pop_group_to_source (w->cr);
+    cairo_paint (w->cr);
 }
 
 // draw a text input box
@@ -1073,43 +1205,43 @@ static void draw_text_input(cairo_t * cr) {
 }
 
 // draw add text to input box
-static void text_input_add_text(gx_matcheqUI *ui, char * label) {
-    draw_text_input(ui->text_input.cr);
+static void text_input_add_text(Widget_t *w, char *label, char *text_field) {
+    draw_text_input(w->cr);
     cairo_text_extents_t extents;
-    cairo_set_source_rgb (ui->text_input.cr, 0., 0.1, 0.1);
-    cairo_set_font_size (ui->text_input.cr, 11.0);
-    if (strlen(ui->input_label))
-        ui->input_label[strlen(ui->input_label)-1] = 0;
-    if (strlen(ui->input_label)<14) {
+    cairo_set_source_rgb (w->cr, 0., 0.1, 0.1);
+    cairo_set_font_size (w->cr, 11.0);
+    if (strlen(text_field))
+        text_field[strlen(text_field)-1] = 0;
+    if (strlen(text_field)<14) {
         if (strlen(label))
-        strcat(ui->input_label, label);
+        strcat(text_field, label);
     }
-    strcat(ui->input_label, "|");
-    cairo_select_font_face (ui->text_input.cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+    strcat(text_field, "|");
+    cairo_select_font_face (w->cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                                CAIRO_FONT_WEIGHT_BOLD);
-    cairo_text_extents(ui->text_input.cr,ui->input_label , &extents);
+    cairo_text_extents(w->cr,text_field , &extents);
 
-    cairo_move_to (ui->text_input.cr, 2, 18.0+extents.height);
-    cairo_show_text(ui->text_input.cr, ui->input_label);
+    cairo_move_to (w->cr, 2, 18.0+extents.height);
+    cairo_show_text(w->cr, text_field);
 
 }
 
 // draw remove last character from input box
-static void text_input_clip(gx_matcheqUI *ui) {
-    draw_text_input(ui->text_input.cr);
+static void text_input_clip(Widget_t *w, char *text_field) {
+    draw_text_input(w->cr);
     cairo_text_extents_t extents;
-    cairo_set_source_rgb (ui->text_input.cr, 0., 0.1, 0.1);
-    cairo_set_font_size (ui->text_input.cr, 11.0);
-    if (strlen(ui->input_label)>=2) {
-        ui->input_label[strlen(ui->input_label)-2] = 0;
-        strcat(ui->input_label, "|");
+    cairo_set_source_rgb (w->cr, 0., 0.1, 0.1);
+    cairo_set_font_size (w->cr, 11.0);
+    if (strlen(text_field)>=2) {
+        text_field[strlen(text_field)-2] = 0;
+        strcat(text_field, "|");
     }
-    cairo_select_font_face (ui->text_input.cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+    cairo_select_font_face (w->cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                                CAIRO_FONT_WEIGHT_BOLD);
-    cairo_text_extents(ui->text_input.cr,ui->input_label , &extents);
+    cairo_text_extents(w->cr,text_field , &extents);
 
-    cairo_move_to (ui->text_input.cr, 2, 18.0+extents.height);
-    cairo_show_text(ui->text_input.cr, ui->input_label);
+    cairo_move_to (w->cr, 2, 18.0+extents.height);
+    cairo_show_text(w->cr, text_field);
 
 }
 
@@ -1120,11 +1252,12 @@ static void text_input_clip(gx_matcheqUI *ui) {
 ----------------------------------------------------------------------*/
 
 // destroy popup menu
-static void popup_menu_destroy(gx_matcheqUI *ui) {
-    destroy_widget(ui->dpy, &ui->load_p);
-    destroy_widget(ui->dpy, &ui->save_p);
-    destroy_widget(ui->dpy, &ui->delete_p);
-    destroy_widget(ui->dpy, &ui->pop_win);
+static void popup_menu_destroy(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+    destroy_widget( ui->load_p, ui->widgets_context);
+    destroy_widget( ui->save_p, ui->widgets_context);
+    destroy_widget( ui->delete_p, ui->widgets_context);
+    destroy_widget( ui->pop_win, ui->widgets_context);
 
     ui->poped = false;
     float zero = 0.0;
@@ -1132,20 +1265,22 @@ static void popup_menu_destroy(gx_matcheqUI *ui) {
 }
 
 // destroy the preset menu
-static void preset_menu_destroy(gx_matcheqUI *ui) {
+static void preset_menu_destroy(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
     for (int i = 0;i<ui->profile_counter;i++) {
-        destroy_widget(ui->dpy, &ui->menu_item[i]);
+        destroy_widget( ui->menu_item[i], ui->widgets_context);
     }
-    destroy_widget(ui->dpy, &ui->preset_menu);
+    destroy_widget( ui->preset_menu, ui->widgets_context);
     ui->menu_poped = false;
     ui->menu_delete_poped = false;
 }
 
 // destroy the text input box
-static void text_input_destroy(gx_matcheqUI *ui) {
-    destroy_widget(ui->dpy, &ui->cancel);
-    destroy_widget(ui->dpy, &ui->ok);
-    destroy_widget(ui->dpy, &ui->text_input);
+static void text_input_destroy(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+    destroy_widget( ui->cancel, ui->widgets_context);
+    destroy_widget( ui->ok, ui->widgets_context);
+    destroy_widget( ui->text_input, ui->widgets_context);
     ui->text_in = false;
 }
 
@@ -1208,7 +1343,8 @@ static int read_profile_file(gx_matcheqUI *ui, profile *p, int del) {
     return m;
 }
 
-static void save_profile(gx_matcheqUI *ui) {
+static void save_profile(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
     if (!(strlen(ui->input_label)>1)) return;
     ui->input_label[strlen(ui->input_label)-1] = 0;
 
@@ -1223,11 +1359,14 @@ static void save_profile(gx_matcheqUI *ui) {
         ui->current_profile = ui->input_label;
         ui->profile_counter++;
     }
+    text_input_destroy(ui,0);
 }
 
 /*------------------- load / delete profiles ---------------------*/
 
-static void load_profile(gx_matcheqUI *ui, int i) {
+static void load_profile(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+    int i = *(int*)(user_data);
     ui->current_profile = ui->p[i].name;
     for (int a=0;a<11;a++) {
         ui->c_states[a] = ui->p[i].c_states[a];
@@ -1240,7 +1379,10 @@ static void load_profile(gx_matcheqUI *ui, int i) {
     return;
 }
 
-static void delete_profile(gx_matcheqUI *ui, int i) {
+static void delete_profile(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+    preset_menu_destroy(ui,NULL);
+    int i = *(int*)(user_data);
     for (int i = 0; i<ui->profile_counter;i++) {
         strcpy(ui->p[i].name,"");
         for (int a=0;a<11;a++) {
@@ -1257,90 +1399,93 @@ static void delete_profile(gx_matcheqUI *ui, int i) {
 -----------------------------------------------------------------------
 ----------------------------------------------------------------------*/
 
-// create pop up menu
-static void pop_up_menu(gx_matcheqUI *ui) {
-    if (ui->poped) return;
-    create_widget(ui->dpy, &ui->pop_win, ui->win, 
-        (double)ui->controls[27].al.x * ui->rescale.x2* ui->rescale.c,
-        (double)(ui->controls[27].al.y * ui->rescale.y2* ui->rescale.c -10),
-        50, 60);
-
-    create_widget(ui->dpy, &ui->load_p, ui->pop_win.widget, 0, 0, 50, 20);
-    create_widget(ui->dpy, &ui->save_p, ui->pop_win.widget, 0, 20, 50, 20);
-    create_widget(ui->dpy, &ui->delete_p, ui->pop_win.widget, 0, 40, 50, 20);
-
-    XMapWindow(ui->dpy, ui->pop_win.widget);
-    XMapSubwindows(ui->dpy, ui->pop_win.widget);
-    draw_menu_item(ui->load_p.cr,"Load", false, 0, 0, 50, 20);
-    draw_menu_item(ui->save_p.cr,"Save", false, 0, 0, 50, 20);
-    draw_menu_item(ui->delete_p.cr,"Delete", false, 0, 0, 50, 20);
-
-    ui->poped = true;
-}
-
 // create profiles menu
-static void pop_up_profile_menu(gx_matcheqUI *ui) {
-    
+static void pop_up_profile_menu(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+    int xxx = *(int*)(user_data);
     if (ui->menu_poped) return;
     ui->profile_counter = read_profile_file(ui, ui->p,-1);
     if (!ui->profile_counter ) return;
-    create_widget(ui->dpy, &ui->preset_menu, ui->win, 
+    ui->preset_menu = create_widget(ui->dpy, ui->win, ui->widgets_context, 
         (double)(ui->controls[27].al.x * ui->rescale.x2* ui->rescale.c-60),
         (double)(ui->controls[27].al.y * ui->rescale.y2* ui->rescale.c-(20*ui->profile_counter)),
         120, 20*ui->profile_counter);
     
     for (int i = 0;i<ui->profile_counter;i++) {
-        create_widget(ui->dpy, &ui->menu_item[i], ui->preset_menu.widget, 0, 0+(20*i), 120, 20);
-    }
-
-    XMapWindow(ui->dpy, ui->preset_menu.widget);
-    XMapSubwindows(ui->dpy, ui->preset_menu.widget);
-    for (int i = 0;i<ui->profile_counter;i++) {
-        draw_menu_item(ui->menu_item[i].cr,ui->p[i].name, false, 0, 0, 120, 20);
+        ui->menu_item[i] = create_menu_item(ui->dpy, ui->preset_menu->widget, ui->widgets_context, ui->p[i].name, 0, 0+(20*i), 120, 20);
+        ui->menu_item[i]->data = i;
+        if (xxx == -1) ui->menu_item[i]->button1_callback = delete_profile;
+        else ui->menu_item[i]->button1_callback = load_profile;
+        ui->menu_item[i]->button_release_callback = preset_menu_destroy;
     }
 
     ui->menu_poped = true;
 }
 
 // create profiles delete
-static void pop_up_delete_menu(gx_matcheqUI *ui) {
-    if (ui->menu_delete_poped) return;
+static void pop_up_delete_menu(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
+     if (ui->menu_delete_poped) return;
     if (ui->menu_poped) return;
     if (!ui->profile_counter ) return;
-    pop_up_profile_menu(ui);
+    int neg = -1;
+    pop_up_profile_menu(ui,&neg);
     ui->menu_poped = false;
     ui->menu_delete_poped = true;
 }
 
 // create text input box
-static void pop_up_text_input(gx_matcheqUI *ui) {
+static void pop_up_text_input(void *ui_, void* user_data) {
+    gx_matcheqUI *ui = (gx_matcheqUI*)ui_;
     if (ui->text_in) return;
     if (ui->profile_counter >MAXPROFILES-1) return;
-    fprintf(stderr, "profile_counter %i\n",ui->profile_counter);
+    debug_print("profile_counter %i\n",ui->profile_counter);
     
-    create_widget(ui->dpy, &ui->text_input, ui->win, 
-        (double)(ui->controls[27].al.x * ui->rescale.x2* ui->rescale.c -60),
-        (double)(ui->controls[23].al.y * ui->rescale.y2* ui->rescale.c-(40.0* ui->rescale.y2)),
+    memset(ui->input_label, 0, 16 * (sizeof ui->input_label[0]) );
+    ui->text_input = create_text_box(ui->dpy, ui->win,  ui->widgets_context,
+        (double)(ui->controls[27].al.x * ui->rescale.x2* ui->rescale.c -65),
+        (double)(ui->controls[23].al.y * ui->rescale.y2* ui->rescale.c-(65.0* ui->rescale.y2)),
         120, 60);
 
-    create_widget(ui->dpy, &ui->cancel, ui->text_input.widget, 10, 38, 50, 20);
-    create_widget(ui->dpy, &ui->ok, ui->text_input.widget, 65, 38, 50, 20);
+    ui->cancel = create_menu_item(ui->dpy, ui->text_input->widget, ui->widgets_context, "Cancel", 10, 38, 50, 20);
+    ui->ok = create_menu_item(ui->dpy, ui->text_input->widget, ui->widgets_context, "ok", 65, 38, 50, 20);
     
-    XDefineCursor(ui->dpy,ui->text_input.widget,XCreateFontCursor(ui->dpy,XC_xterm)); 
-    XDefineCursor(ui->dpy,ui->cancel.widget,XCreateFontCursor(ui->dpy,XC_top_left_arrow)); 
-    XDefineCursor(ui->dpy,ui->ok.widget,XCreateFontCursor(ui->dpy,XC_left_ptr)); 
-    XMapWindow(ui->dpy, ui->text_input.widget);
-    XMapSubwindows(ui->dpy, ui->text_input.widget);
+    XDefineCursor(ui->dpy,ui->text_input->widget,XCreateFontCursor(ui->dpy,XC_xterm)); 
+    XDefineCursor(ui->dpy,ui->cancel->widget,XCreateFontCursor(ui->dpy,XC_top_left_arrow)); 
+    XDefineCursor(ui->dpy,ui->ok->widget,XCreateFontCursor(ui->dpy,XC_left_ptr)); 
+
+    text_input_add_text(ui->text_input, "", ui->input_label);
     
-    memset(ui->input_label, 0, 124 * (sizeof ui->input_label[0]) );
-    draw_text_input(ui->text_input.cr);
-    text_input_add_text(ui, "");
-    draw_menu_item(ui->cancel.cr,"Cancel", false, 0, 0, 50, 20);
-    draw_menu_item(ui->ok.cr,"ok", false, 0, 0, 50, 20);
-    
-    XWarpPointer(ui->dpy, None, ui->text_input.widget, 0, 0, 0, 0, 6,20);
+    XWarpPointer(ui->dpy, None, ui->text_input->widget, 0, 0, 0, 0, 6,20);
+
+    //ui->cancel->button1_callback = text_input_destroy;
+    ui->cancel->button_release_callback = text_input_destroy;
+    ui->ok->button1_callback = save_profile;
+    ui->ok->button_release_callback = text_input_destroy;
 
     ui->text_in = true;
+}
+
+// create pop up menu
+static void pop_up_menu(gx_matcheqUI *ui) {
+    if (ui->poped) return;
+    ui->pop_win = create_widget(ui->dpy, ui->win, ui->widgets_context,
+        (double)ui->controls[27].al.x * ui->rescale.x2* ui->rescale.c,
+        (double)(ui->controls[27].al.y * ui->rescale.y2* ui->rescale.c -10),
+        50, 60);
+
+    ui->load_p = create_menu_item(ui->dpy, ui->pop_win->widget, ui->widgets_context, "Load", 0, 0, 50, 20);
+    ui->save_p = create_menu_item(ui->dpy, ui->pop_win->widget, ui->widgets_context, "Save", 0, 20, 50, 20);
+    ui->delete_p = create_menu_item(ui->dpy, ui->pop_win->widget, ui->widgets_context, "Delete", 0, 40, 50, 20);
+
+    ui->load_p->button1_callback = pop_up_profile_menu;
+    ui->load_p->button_release_callback = popup_menu_destroy;
+    ui->save_p->button1_callback = pop_up_text_input;
+    ui->save_p->button_release_callback = popup_menu_destroy;
+    ui->delete_p->button1_callback = pop_up_delete_menu;
+    ui->delete_p->button_release_callback = popup_menu_destroy;
+
+    ui->poped = true;
 }
 
 /*---------------------------------------------------------------------
@@ -1353,8 +1498,8 @@ inline float power2db(gx_matcheqUI *ui, int port_index, float power) {
     const float falloff = 27 * 60 * 0.0005;
     const float fallsoft = 6 * 60 * 0.0005;
 
-    if (power <=  20.*log10(0.00021)) {
-        power = 20.*log10(0.0);
+    if (power <=  20.*log10(0.00021)) { // -70db
+        power = 20.*log10(0.00000000001); //-137db
         if(!ui->analyse) ui->controls[port_index].adj.old_max_value = min(0.0,ui->controls[port_index].adj.old_max_value - fallsoft); 
     }
     //power = 20.*log10(power); // moved into dsp class
@@ -1379,10 +1524,10 @@ inline float power2db(gx_matcheqUI *ui, int port_index, float power) {
 
 // resize the xwindow and the cairo xlib surface
 static void resize_event(gx_matcheqUI *ui) {
-    if(ui->poped) popup_menu_destroy(ui);
-    if (ui->text_in) text_input_destroy(ui);
-    if (ui->menu_poped) preset_menu_destroy(ui);
-    if (ui->menu_delete_poped) preset_menu_destroy(ui);
+    if(ui->poped) popup_menu_destroy(ui,NULL);
+    if (ui->text_in) text_input_destroy(ui,NULL);
+    if (ui->menu_poped) preset_menu_destroy(ui,NULL);
+    if (ui->menu_delete_poped) preset_menu_destroy(ui,NULL);
     XWindowAttributes attrs;
     XGetWindowAttributes(ui->dpy, (Window)ui->parentXwindow, &attrs);
     ui->width = attrs.width;
@@ -1393,7 +1538,7 @@ static void resize_event(gx_matcheqUI *ui) {
     ui->rescale.y  = (double)ui->height/ui->init_height;
     ui->rescale.x1 = (double)ui->init_width/ui->width;
     ui->rescale.y1 = (double)ui->init_height/ui->height;
-    ui->rescale.xc = (double)ui->width/(ui->init_width-195 + (10 * CONTROLS));
+    ui->rescale.xc = (double)ui->width/(ui->init_width-205 + (10 * CONTROLS));
     ui->rescale.c = (ui->rescale.xc < ui->rescale.y) ? ui->rescale.xc : ui->rescale.y;
     ui->rescale.x2 =  ui->rescale.xc / ui->rescale.c;
     ui->rescale.y2 = ui->rescale.y / ui->rescale.c;
@@ -1530,6 +1675,16 @@ static void check_value_changed(gx_matcheqUI *ui, int i, float* value) {
         ui->controls[i].adj.value = *(value);
         if (ui->controls[i].type == SWITCH) {
             check_switch_state(ui, i, value);
+        }
+        if (ui->controls[i].port == BYPASS) {
+            if(*(value)<0.01) {
+                for (int a=0;a<11;a++) {
+                    ui->controls[a+12].adj.value = -70.0;
+                    ui->controls[a+12].adj.old_max_value = -70;
+                    ui->controls[a+12].adj.old_value = -70;
+                    send_controller_event(ui, a+12);
+                }
+            }
         }
         if (ui->controls[i].type != METER) {
             ui->write_function(ui->controller,ui->controls[i].port,sizeof(float),0,value);
@@ -1785,6 +1940,7 @@ static int key_mapping(Display *dpy, XKeyEvent *xkey) {
 // general xevent handler
 static void event_handler(gx_matcheqUI *ui) {
     XEvent xev;
+    XPointer w;
 
     while (XPending(ui->dpy) > 0) {
         XNextEvent(ui->dpy, &xev);
@@ -1809,43 +1965,21 @@ static void event_handler(gx_matcheqUI *ui) {
                         if (xev.xbutton.type == ButtonPress) {
                             ui->blocked = true;
                         }
-                        if (ui->poped) {
-                            if (xev.xbutton.window == ui->load_p.widget) {
-                                pop_up_profile_menu(ui);
-                            } else if (xev.xbutton.window == ui->save_p.widget) {
-                                pop_up_text_input(ui);
-                            } else if (xev.xbutton.window == ui->delete_p.widget) {
-                                pop_up_delete_menu(ui);
+
+                        if(!XFindContext(ui->dpy, xev.xbutton.window, ui->widgets_context,  &w)) {
+                            Widget_t * wid = (Widget_t*)w;
+                            wid->button1_callback(ui,&wid->data);
+                        } else {
+                            if (ui->poped) {
+                                popup_menu_destroy(ui,NULL);
+                                break;
+                            } else if (ui->menu_delete_poped) {
+                                preset_menu_destroy(ui,NULL);
+                                break;
+                            } else if (ui->menu_poped) {
+                                preset_menu_destroy(ui,NULL);
+                                break;
                             }
-                            popup_menu_destroy(ui);
-                            break;
-                        } else if (ui->text_in) {
-                            if (xev.xbutton.window == ui->ok.widget) {
-                                save_profile(ui);
-                                text_input_destroy(ui);
-                            } else if (xev.xbutton.window == ui->cancel.widget) {
-                                pop_up_text_input(ui);
-                                text_input_destroy(ui);
-                            } 
-                            break;
-                        } else if (ui->menu_delete_poped) {
-                            for (int i = 0;i<ui->profile_counter;i++) {
-                                if(xev.xbutton.window == ui->menu_item[i].widget) {
-                                    delete_profile(ui, i);
-                                    break;
-                                }
-                            }
-                            preset_menu_destroy(ui);
-                            break;
-                        } else if (ui->menu_poped) {
-                            for (int i = 0;i<ui->profile_counter;i++) {
-                                if(xev.xbutton.window == ui->menu_item[i].widget) {
-                                    load_profile(ui, i);
-                                    break;
-                                }
-                            }
-                            preset_menu_destroy(ui);
-                            break;
                         }
 
                         // left mouse button click
@@ -1853,11 +1987,11 @@ static void event_handler(gx_matcheqUI *ui) {
                     break;
                     case Button2:
                         // click on the mouse wheel
-                        //fprintf(stderr,"Button2 \n");
+                        debug_print("Button2 \n");
                     break;
                     case Button3:
                         // right mouse button click
-                        //fprintf(stderr,"Button3 \n");
+                        debug_print("Button3 \n");
                     break;
                     case  Button4:
                         // mouse wheel scroll up
@@ -1875,7 +2009,11 @@ static void event_handler(gx_matcheqUI *ui) {
                 if (xev.xbutton.type == ButtonRelease) {
                     ui->blocked = false;
                 }
-            break;
+                if(!XFindContext(ui->dpy, xev.xbutton.window, ui->widgets_context,  &w)) {
+                    Widget_t * wid = (Widget_t*)w;
+                    wid->button_release_callback(ui,&wid->data);
+                }
+             break;
 
             case KeyPress:
                 {
@@ -1898,11 +2036,10 @@ static void event_handler(gx_matcheqUI *ui) {
                         break;
                         case 8: 
                             if(ui->text_in) {
-                                save_profile(ui);
-                                text_input_destroy(ui);
+                                save_profile(ui,0);
                             }
                         break;
-                        case 9: if(ui->text_in) text_input_clip(ui);
+                        case 9: if(ui->text_in) text_input_clip(ui->text_input, ui->input_label);
                         break;
                         default:
                         break;
@@ -1913,84 +2050,30 @@ static void event_handler(gx_matcheqUI *ui) {
                         int n;
                         n = XLookupString(&xev.xkey, buf, sizeof(buf),
                                     &keysym, NULL);
-                        if(n) text_input_add_text(ui, buf);
+                        if(n) text_input_add_text(ui->text_input, buf, ui->input_label);
                     }
                 }
 
             break;
 
             case EnterNotify:
-                if(ui->poped) {
-                    if(xev.xcrossing.window == ui->load_p.widget) {
-                        draw_menu_item(ui->load_p.cr,"Load",true,0,0,50,20);
-                        break;
-                    } else if(xev.xcrossing.window == ui->save_p.widget) {
-                        draw_menu_item(ui->save_p.cr,"Save",true,0,0,50,20);
-                        break;
-                    } else if(xev.xcrossing.window == ui->delete_p.widget) {
-                        draw_menu_item(ui->delete_p.cr,"Delete",true,0,0,50,20);
-                        break;
-                    }
-                } else if (ui->menu_poped) {
-                    for (int i = 0;i<ui->profile_counter;i++) {
-                        if(xev.xbutton.window == ui->menu_item[i].widget) {
-                            draw_menu_item(ui->menu_item[i].cr,ui->p[i].name,true,0,0,120,20);
-                            break;
-                        }
-                    }
-                } else if (ui->menu_delete_poped){
-                     for (int i = 0;i<ui->profile_counter;i++) {
-                        if(xev.xbutton.window == ui->menu_item[i].widget) {
-                            draw_menu_item(ui->menu_item[i].cr,ui->p[i].name,true,0,0,120,20);
-                            break;
-                        }
-                    }
-                } else if (ui->text_in) {
-                    if (xev.xbutton.window == ui->ok.widget) {
-                        draw_menu_item(ui->ok.cr,"ok",true,0,0,50,20);
-                        break;
-                    } else if (xev.xbutton.window == ui->cancel.widget) {
-                        draw_menu_item(ui->cancel.cr,"Cancel",true,0,0,50,20);
-                        break;
-                    } 
+                if(!XFindContext(ui->dpy, xev.xcrossing.window, ui->widgets_context,  &w)) {
+                    Widget_t *wid = (Widget_t*)w;
+                    wid->active = true;
+                    if(!(xev.xcrossing.state & Button1Mask))
+                        wid->enter_callback(wid,&wid->active);
                 }
+
                 if (!ui->blocked) get_last_active_controller(ui, true);
             break;
             case LeaveNotify:
-                if(ui->poped) {
-                    if(xev.xcrossing.window == ui->load_p.widget) {
-                        draw_menu_item(ui->load_p.cr,"Load",false,0,0,50,20);
-                        break;
-                    } else if(xev.xcrossing.window == ui->save_p.widget) {
-                        draw_menu_item(ui->save_p.cr,"Save",false,0,0,50,20);
-                        break;
-                    } else if(xev.xcrossing.window == ui->delete_p.widget) {
-                        draw_menu_item(ui->delete_p.cr,"Delete",false,0,0,50,20);
-                        break;
-                    }
-                } else if (ui->menu_poped) {
-                    for (int i = 0;i<ui->profile_counter;i++) {
-                        if(xev.xbutton.window == ui->menu_item[i].widget) {
-                            draw_menu_item(ui->menu_item[i].cr,ui->p[i].name,false,0,0,120,20);
-                            break;
-                        }
-                    }
-                } else if (ui->menu_delete_poped){
-                     for (int i = 0;i<ui->profile_counter;i++) {
-                        if(xev.xbutton.window == ui->menu_item[i].widget) {
-                            draw_menu_item(ui->menu_item[i].cr,ui->p[i].name,false,0,0,120,20);
-                            break;
-                        }
-                    }
-                } else if (ui->text_in) {
-                    if (xev.xbutton.window == ui->ok.widget) {
-                        draw_menu_item(ui->ok.cr,"ok",false,0,0,50,20);
-                        break;
-                    } else if (xev.xbutton.window == ui->cancel.widget) {
-                        draw_menu_item(ui->cancel.cr,"Cancel",false,0,0,50,20);
-                        break;
-                    } 
+                if(!XFindContext(ui->dpy, xev.xcrossing.window, ui->widgets_context,  &w)) {
+                    Widget_t *wid = (Widget_t*)w;
+                    wid->active = false;
+                    if(!(xev.xcrossing.state & Button1Mask))
+                        wid->leave_callback(wid,&wid->active);
                 }
+
                 if (!ui->blocked) get_last_active_controller(ui, false);
             break;
             case MotionNotify:
