@@ -34,10 +34,12 @@
 	BUNDLE = $(NAME).lv2
 	VER = 0.1
 	# set compile flags
-	CXXFLAGS += -I. -I./dsp -I./plugin -fPIC -DPIC -O2 -Wall -funroll-loops -ffast-math -fomit-frame-pointer -fstrength-reduce -fdata-sections -Wl,--gc-sections $(SSE_CFLAGS)
-	DEBUGFLAGS += -I. -I./dsp -I./plugin -fPIC -DPIC -O2 -Wall -D DEBUG -D NOSSE
-	LDFLAGS += -I. -shared -lm 
-	GUI_LDFLAGS += -I./gui -shared -lm `pkg-config --cflags --libs cairo` -L/usr/X11/lib -lX11
+	CXXFLAGS += -D_FORTIFY_SOURCE=2 -I. -I./dsp -I./plugin -fPIC -DPIC -O2 \
+	 -Wall -fstack-protector -funroll-loops -ffast-math -fomit-frame-pointer -fstrength-reduce \
+	 -fdata-sections -Wl,--gc-sections -Wl,-z,relro,-z,now $(SSE_CFLAGS)
+	DEBUGFLAGS += -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now -I. -I./dsp -I./plugin -fPIC -DPIC -O2 -Wall -D DEBUG -D NOSSE
+	LDFLAGS += -I. -shared -lm -lm -Wl,-z,noexecstack 
+	GUI_LDFLAGS += -I./gui -shared -lm -Wl,-z,noexecstack -lm `pkg-config --cflags --libs cairo` -L/usr/X11/lib -lX11
 	# invoke build files
 	OBJECTS = plugin/$(NAME).cpp 
 	GUI_OBJECTS = gui/$(NAME)_x11ui.c
@@ -110,8 +112,8 @@ uninstall :
 $(NAME) : clean $(RES_OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) $(LDFLAGS) -o $(NAME).so
 	$(CC) $(CXXFLAGS) -Wl,-z,nodelete $(GUI_OBJECTS) $(RES_OBJECTS) $(GUI_LDFLAGS) -o $(NAME)_ui.so
-	$(STRIP) -s -x -X -R .comment -R .eh_frame -R .eh_frame_hdr -R .note.gnu.build-id -R .note.ABI-tag $(NAME).so
-	$(STRIP) -s -x -X -R .comment -R .eh_frame -R .eh_frame_hdr -R .note.gnu.build-id -R .note.ABI-tag $(NAME)_ui.so
+	$(STRIP) -s -x -X -R .comment -R .note.ABI-tag $(NAME).so
+	$(STRIP) -s -x -X -R .comment -R .note.ABI-tag $(NAME)_ui.so
 
 $(NAME)debug : clean $(RES_OBJECTS)
 	$(CXX) $(DEBUGFLAGS) $(OBJECTS) $(LDFLAGS) -o $(NAME).so
@@ -119,4 +121,4 @@ $(NAME)debug : clean $(RES_OBJECTS)
 
 nogui : clean
 	$(CXX) $(CXXFLAGS) $(OBJECTS) $(LDFLAGS) -o $(NAME).so
-	$(STRIP) -s -x -X -R .comment -R .eh_frame -R .eh_frame_hdr -R .note.gnu.build-id -R .note.ABI-tag $(NAME).so
+	$(STRIP) -s -x -X -R .comment -R .note.ABI-tag $(NAME).so
