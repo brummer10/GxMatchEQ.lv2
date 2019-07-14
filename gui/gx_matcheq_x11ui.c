@@ -1414,9 +1414,12 @@ static void pop_up_profile_menu(void *ui_, void* user_data) {
     for (int i = 0;i<ui->profile_counter;i++) {
         ui->menu_item[i] = create_menu_item(ui->dpy, ui->preset_menu->widget, ui->widgets_context, ui->p[i].name, 0, 0+(20*i), 120, 20);
         ui->menu_item[i]->data = i;
-        if (xxx == -1) ui->menu_item[i]->button1_callback = delete_profile;
-        else ui->menu_item[i]->button1_callback = load_profile;
-        ui->menu_item[i]->button_release_callback = preset_menu_destroy;
+        if (xxx == -1) {
+            ui->menu_item[i]->button1_callback = delete_profile;
+        } else {
+            ui->menu_item[i]->button1_callback = load_profile;
+            ui->menu_item[i]->button_release_callback = preset_menu_destroy;
+        }
     }
 
     ui->menu_poped = true;
