@@ -1333,7 +1333,7 @@ static int read_profile_file(gx_matcheqUI *ui, profile *p, int del) {
         if(del>=0) {
             fp = fopen(ui->profile_file, "w");
             for(int i = 0; i< ui->profile_counter; i++) {
-                fprintf(fp,p[i].name);
+                fprintf(fp,"%s",p[i].name);
                 for (int a=0;a<11;a++) {
                     fprintf(fp," | %f",p[i].c_states[a]);
                 }
@@ -1352,7 +1352,7 @@ static void save_profile(void *ui_, void* user_data) {
 
     FILE* f = fopen(ui->profile_file, "a");
     if (f != NULL) {
-        fprintf(f,ui->input_label);
+        fprintf(f,"%s",ui->input_label);
         for (int a=0;a<11;a++) {
             fprintf(f," | %f",ui->c_states[a]);
         }
