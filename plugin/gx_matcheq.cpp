@@ -271,7 +271,8 @@ void Gx_matcheq_::run_dsp_(uint32_t n_samples)
 
   FAUSTFLOAT buf[n_samples];
   // do inplace processing at default
-  memcpy(output, input, n_samples*sizeof(float));
+  if (output != input)
+    memcpy(output, input, n_samples*sizeof(float));
   // check if bypass is pressed
   if (bypass_ != static_cast<uint32_t>(*(bypass))) {
     bypass_ = static_cast<uint32_t>(*(bypass));
